@@ -38,6 +38,15 @@ dependencies:
   cross_file: ^0.3.4+2
   font_awesome_flutter: ^10.8.0
   http: ^1.4.0
+  # XLSX→CSV 변환용
+  excel: ^2.0.1
+  csv: ^5.0.0
+  path_provider: ^2.0.12
+  http_parser: ^4.0.0
+  # DOCX/PPTX→PDF 변환용 (데스크톱)
+  libre_doc_converter: ^0.1.1
+  syncfusion_flutter_pdf: ^29.2.8
+  path: ^1.9.1
 
 dev_dependencies:
   flutter_test:

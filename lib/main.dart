@@ -1,8 +1,16 @@
 import 'dart:io';
-import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:desktop_drop/desktop_drop.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
+import 'package:http/http.dart' as http;
+import 'package:http_parser/http_parser.dart';
+import 'package:excel/excel.dart' as e;
+import 'package:csv/csv.dart';
+import 'package:libre_doc_converter/libre_doc_converter.dart';
+import 'dart:async';
+import 'package:path_provider/path_provider.dart';
+import 'package:path/path.dart' as path;
+import 'package:syncfusion_flutter_pdf/pdf.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -49,7 +57,277 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> {
     'jpeg',
   ];
 
-  bool _isLoading = false;
+  bool _isUploading = false;
+  String _uploadStatus = "파일을 드래그 앤 드롭하거나 선택하세요.";
+
+  Future<String> extractFirstNPages({
+    required String inputFilePath,
+    required String outputFilePath,
+    required int nPages,
+  }) async {
+    // 1) 원본 PDF 불러오기
+    //    (로컬 파일 시스템에서 읽어올 때는 File(...).readAsBytesSync() 사용)
+    final List<int> originalBytes = File(inputFilePath).readAsBytesSync();
+    final PdfDocument originalPdf = PdfDocument(inputBytes: originalBytes);
+
+    // 2) 새 PdfDocument 생성
+    final PdfDocument newPdf = PdfDocument();
+
+    // 3) 앞 nPages 만큼 페이지 복사
+    int total = originalPdf.pages.count;
+    int pagesToCopy = (nPages > total) ? total : nPages;
+
+    for (int i = 0; i < pagesToCopy; i++) {
+      // PdfPageBase page = originalPdf.pages[i]; // 페이지 객체
+      // 페이지를 통째로 import 해서 복사
+      newPdf.pages.add().graphics.drawPdfTemplate(
+        originalPdf.pages[i].createTemplate(),
+        Offset(0, 0),
+        // 원본 페이지 크기에 맞추기
+        Size(
+            originalPdf.pages[i].size.width,
+            originalPdf.pages[i].size.height
+        ),
+      );
+    }
+
+    // 4) 결과를 바이트로 저장
+    final List<int> bytes = await newPdf.save();
+    newPdf.dispose();
+    originalPdf.dispose();
+
+    // 5) 디스크에 쓰기
+    File(outputFilePath).writeAsBytesSync(bytes);
+
+    return outputFilePath;
+
+  }
+
+  Future<void> _uploadFiles() async {
+    if (_droppedFiles.isEmpty) {
+      setState(() {
+        _uploadStatus = "업로드할 파일이 없습니다.";
+      });
+      return;
+    }
+
+    setState(() {
+      _isUploading = true;
+      _uploadStatus = "파일 업로드 전처리 중...";
+    });
+
+    // 1) 변환된 파일들만 담을 리스트를 만듭니다.
+    List<File> processedFiles = [];
+
+    // 2) 컨테이너 내부 임시 저장 디렉토리 경로를 가져옵니다.
+    final tempDir = await getApplicationDocumentsDirectory();
+    // 3) 시스템 전체 임시 디렉토리 (컨테이너 샌드박스 회피용)
+    final sysTemp = Directory.systemTemp;
+
+    for (var original in _droppedFiles) {
+      final ext = original.path.split('.').last.toLowerCase();
+      final baseName = path.basenameWithoutExtension(original.path);
+
+      if (ext == 'xlsx') {
+        // --- XLSX → CSV 변환 로직 ---
+        try {
+          final bytes = await original.readAsBytes();
+          final excel = e.Excel.decodeBytes(bytes);
+
+          // 모든 시트의 행 데이터를 2차원 리스트로 수집
+          List<List<dynamic>> rows = [];
+          for (var sheetName in excel.tables.keys) {
+            final sheet = excel.tables[sheetName]!;
+            for (var row in sheet.rows) {
+              rows.add(row);
+            }
+          }
+
+          // CSV 문자열로 변환
+          String csvData = const ListToCsvConverter().convert(rows);
+
+          // 컨테이너 내부 임시 경로에 저장 (예: ".../basename.csv")
+          final csvPath = path.join(tempDir.path, '$baseName.csv');
+          final csvFile = File(csvPath);
+          await csvFile.writeAsString(csvData);
+
+          print('CSV 변환 성공 : $csvData');
+
+          processedFiles.add(csvFile);
+        } catch (e) {
+          // 변환 실패 시 원본 XLSX를 그대로 업로드 리스트에 추가
+          processedFiles.add(original);
+          print('XLSX → CSV 변환 오류 ($ext): $e');
+        }
+      } else if (ext == 'docx' || ext == 'pptx') {
+        // --- DOCX/PPTX → PDF 변환 로직 (시스템 tmp 사용, Process.run) ---
+        try {
+
+          // 1) 컨테이너 내부 파일을 시스템 tmp로 복사
+          final sysInputPath = path.join(sysTemp.path, '$baseName.$ext');
+          final sysInputFile = await File(sysInputPath)
+              .writeAsBytes(await original.readAsBytes());
+
+
+          print(sysInputFile);
+
+          final converter = LibreDocConverter(
+            inputFile: sysInputFile,
+          );
+
+          //
+          final sysPdfFile = await converter.toPdf();
+
+            print(sysPdfFile.path);
+
+            // 4) 컨테이너 내부 임시 디렉토리로 변환된 PDF를 복사
+            final containerPdfPath = path.join(tempDir.path, '$baseName.pdf');
+            final containerPdfFile = await File(containerPdfPath)
+                .writeAsBytes(await sysPdfFile.readAsBytes());
+
+            processedFiles.add(containerPdfFile);
+
+            print('PDF변환 성공');
+
+            // 5) 시스템 tmp에 생성된 파일 정리 (선택 사항)
+            if (await sysInputFile.exists()) await sysInputFile.delete();
+            if (await sysPdfFile.exists()) await sysPdfFile.delete();
+
+
+
+        } catch (e) {
+          // 변환 실패 시 원본을 그대로 추가
+          processedFiles.add(original);
+          print('$ext → PDF 변환 오류: $e');
+        }
+      } else {
+        // 그 외 확장자는 변환 없이 그대로 추가
+        processedFiles.add(original);
+      }
+    }
+
+    // 4) CSV 파일에서 앞 20줄만 추출하여 업로드용 리스트 준비
+    List<File> uploadFiles = [];
+    for (var file in processedFiles) {
+      final ext = file.path.split('.').last.toLowerCase();
+      final baseName = path.basenameWithoutExtension(file.path);
+
+      if (ext == 'csv') {
+        // --- CSV 파일에서 맨 앞 20줄만 추출 ---
+        try {
+          final allLines = await file.readAsLines();
+          final trimmedLines = allLines.take(20).toList();
+          final trimmedCsv = trimmedLines.join('\n');
+
+          final trimmedPath = path.join(tempDir.path, '${baseName}_trimmed.csv');
+          final trimmedFile = File(trimmedPath);
+          await trimmedFile.writeAsString(trimmedCsv);
+
+          print('CSV 자르기 성공: $trimmedCsv');
+
+          uploadFiles.add(trimmedFile);
+        } catch (e) {
+          // 트리밍 실패 시 원본 CSV를 업로드
+          uploadFiles.add(file);
+          print('CSV 트리밍 오류: $e');
+        }
+      } else if (ext =='pdf') {
+        try {
+          final String originalPdfPath = file.path;
+          final String extractPdfPath = path.join(tempDir.path, '${baseName}.pdf');
+
+          final String pdfPath = await extractFirstNPages(
+            inputFilePath: originalPdfPath,
+            outputFilePath: extractPdfPath,
+            nPages: 5,
+          );
+
+          final pdfFile = File(pdfPath);
+
+          print('PDF 자르기 성공');
+
+          uploadFiles.add(pdfFile);
+
+        } catch (e){
+          uploadFiles.add(file);
+          print('PDF 자르기 오류: $e');
+        }
+      } else {
+        // PDF나 기타 파일은 그대로 업로드
+        uploadFiles.add(file);
+      }
+    }
+
+    // 5) 변환 및 트리밍 완료 후 상태 업데이트
+    setState(() {
+      _uploadStatus = "파일 업로드 준비 완료: ${uploadFiles.length}개 파일";
+    });
+
+    // 6) 실제 백엔드로 전송
+    setState(() {
+      _uploadStatus = "파일 업로드 중...";
+    });
+    final String backendUrl = 'http://172.25.86.197:8000/upload_and_summarize';
+
+    try {
+      var request = http.MultipartRequest('POST', Uri.parse(backendUrl));
+
+      for (var file in uploadFiles) {
+        final ext = file.path.split('.').last.toLowerCase();
+        String mimeType = 'application/octet-stream';
+
+        if (['jpg', 'jpeg', 'png', 'webp'].contains(ext)) {
+          mimeType = 'image/$ext';
+        } else if (ext == 'pdf') {
+          mimeType = 'application/pdf';
+        } else if (ext == 'docx') {
+          mimeType = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+        } else if (ext == 'xlsx') {
+          mimeType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+        } else if (ext == 'csv') {
+          mimeType = 'text/csv';
+        } else if (ext == 'txt') {
+          mimeType = 'text/plain';
+        } else if (ext == 'pptx') {
+          mimeType = 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
+        }
+
+        request.files.add(
+          await http.MultipartFile.fromPath(
+            'files',
+            file.path,
+            filename: path.basename(file.path),
+            contentType: MediaType.parse(mimeType),
+          ),
+        );
+      }
+
+      var responseStream = await request.send();
+      var response = await http.Response.fromStream(responseStream);
+
+      if (response.statusCode == 200) {
+        setState(() {
+          _uploadStatus = "파일 요약 완료: ${response.body}";
+          print(response.body);
+          _droppedFiles.clear();
+        });
+      } else {
+        setState(() {
+          _uploadStatus = "파일 업로드 실패: ${response.statusCode} - ${response.body}";
+          print(response.body);
+        });
+      }
+    } catch (e) {
+      setState(() {
+        print(e);
+        _uploadStatus = "오류 발생: $e";
+      });
+    } finally {
+      setState(() {
+        _isUploading = false;
+      });
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -148,9 +426,7 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> {
                     ),
                     const SizedBox(height: 8),
                     ElevatedButton(
-                      onPressed: (){
-                        print('asd');
-                      },
+                      onPressed: _isUploading ? null : _uploadFiles,
                       style: ElevatedButton.styleFrom(
                         backgroundColor: const Color(0xFF005DC2),
                         minimumSize: const Size(double.infinity, 44),
@@ -160,7 +436,16 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> {
                         elevation: 6,
                         shadowColor: Colors.black45,
                       ),
-                      child: const Text(
+                      child: _isUploading
+                          ? const SizedBox(
+                        height: 20,
+                        width: 20,
+                        child: CircularProgressIndicator(
+                          color: Colors.white,
+                          strokeWidth: 2,
+                        ),
+                      )
+                          : const Text(
                         'Execute',
                         style: TextStyle(
                           color: Colors.white,
@@ -213,41 +498,38 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> {
                     ),
                     borderRadius: BorderRadius.circular(8),
                   ),
-                  child:
-                      _isLoading
-                          ? Center(
-                            child: Transform.scale(
-                              scale: 1.5,
-                              child: CircularProgressIndicator(
-                                color: const Color(0xFF005DC2),
-                              ),
-                            ),
-                          )
-                          : Column(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              Icon(
-                                Icons.file_open_outlined,
-                                size: 70,
-                                color:
-                                    _dragging
-                                        ? const Color(0xFF005DC2)
-                                        : const Color(0xFFAAAAAA),
-                              ),
-                              const SizedBox(height: 16),
-                              Text(
-                                'Drag & Drop Files Here',
-                                style: TextStyle(
-                                  color:
-                                      _dragging
-                                          ? const Color(0xFF005DC2)
-                                          : const Color(0xFFAAAAAA),
-                                  fontSize: 20,
-                                  fontWeight: FontWeight.w500,
-                                ),
-                              ),
-                            ],
-                          ),
+                  child: _isUploading
+                      ? Center(
+                    child: Transform.scale(
+                      scale: 1.5,
+                      child: CircularProgressIndicator(
+                        color: const Color(0xFF005DC2),
+                      ),
+                    ),
+                  )
+                      : Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(
+                        Icons.file_open_outlined,
+                        size: 70,
+                        color: _dragging
+                            ? const Color(0xFF005DC2)
+                            : const Color(0xFFAAAAAA),
+                      ),
+                      const SizedBox(height: 16),
+                      Text(
+                        'Drag & Drop Files Here',
+                        style: TextStyle(
+                          color: _dragging
+                              ? const Color(0xFF005DC2)
+                              : const Color(0xFFAAAAAA),
+                          fontSize: 20,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ),
@@ -256,150 +538,4 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> {
       ),
     );
   }
-
-  // Future<void> _showCategoryDialog() async {
-  //   String? selected;
-  //   String custom = '';
-  //   await showDialog(
-  //     context: context,
-  //     barrierColor: Colors.black54,
-  //     builder: (ctx) {
-  //       return StatefulBuilder(
-  //         builder: (BuildContext context, StateSetter conceptState) {
-  //           return Dialog(
-  //             shape: RoundedRectangleBorder(
-  //               borderRadius: BorderRadius.circular(16),
-  //             ),
-  //             elevation: 12,
-  //             backgroundColor: Colors.white,
-  //             child: SizedBox(
-  //               width: 400,
-  //               child: Padding(
-  //                 padding: const EdgeInsets.all(24),
-  //                 child: Column(
-  //                   mainAxisSize: MainAxisSize.min,
-  //                   crossAxisAlignment: CrossAxisAlignment.start,
-  //                   children: [
-  //                     const Text(
-  //                       'Select Concept',
-  //                       style: TextStyle(
-  //                         fontSize: 20,
-  //                         fontWeight: FontWeight.bold,
-  //                       ),
-  //                     ),
-  //                     const SizedBox(height: 16),
-  //                     Wrap(
-  //                       spacing: 12,
-  //                       runSpacing: 12,
-  //                       children:
-  //                           ['School', 'Project', 'Company', 'ETC']
-  //                               .map(
-  //                                 (label) => ChoiceChip(
-  //                                   label: Text(label),
-  //                                   selected: selected == label,
-  //                                   selectedColor: const Color(0xFF005DC2),
-  //                                   backgroundColor: const Color(0xFFF0F0F0),
-  //                                   labelStyle: TextStyle(
-  //                                     color:
-  //                                         selected == label
-  //                                             ? Colors.white
-  //                                             : Colors.black87,
-  //                                   ),
-  //                                   onSelected: (v) {
-  //                                     conceptState(() {
-  //                                       selected = v ? label : null;
-  //                                       // clear custom when switching off ETC
-  //                                       if (selected != 'ETC') custom = '';
-  //                                     });
-  //                                   },
-  //                                   shape: RoundedRectangleBorder(
-  //                                     borderRadius: BorderRadius.circular(8),
-  //                                   ),
-  //                                 ),
-  //                               )
-  //                               .toList(),
-  //                     ),
-  //                     if (selected == 'ETC') ...[
-  //                       const SizedBox(height: 16),
-  //                       TextField(
-  //                         decoration: InputDecoration(
-  //                           filled: true,
-  //                           fillColor: const Color(0xFFF7F7F7),
-  //                           hintText: 'Enter custom concept',
-  //                           border: OutlineInputBorder(
-  //                             borderRadius: BorderRadius.circular(8),
-  //                             borderSide: BorderSide.none,
-  //                           ),
-  //                         ),
-  //                         onChanged:
-  //                             (v) => conceptState(() {
-  //                               custom = v;
-  //                             }),
-  //                       ),
-  //                     ],
-  //                     const SizedBox(height: 24),
-  //                     Row(
-  //                       mainAxisAlignment: MainAxisAlignment.end,
-  //                       children: [
-  //                         TextButton(
-  //                           onPressed: () => Navigator.pop(ctx),
-  //                           style: TextButton.styleFrom(
-  //                             foregroundColor: Colors.black54,
-  //                           ),
-  //                           child: const Text('Cancel'),
-  //                         ),
-  //                         const SizedBox(width: 12),
-  //                         ElevatedButton(
-  //                           onPressed:
-  //                               (selected == null ||
-  //                                       (selected == 'ETC' && custom.isEmpty))
-  //                                   ? null
-  //                                   : () async {
-  //                                     final concept =
-  //                                         selected == 'ETC' ? custom : selected;
-  //                                     // TODO: handle selected concept
-  //
-  //                                     print(concept);
-  //
-  //                                     setState(() {
-  //                                       _droppedFiles.clear();
-  //
-  //                                       _isLoading = true;
-  //                                     });
-  //
-  //                                     Navigator.pop(ctx, concept);
-  //
-  //                                     await Future.delayed(
-  //                                       Duration(milliseconds: 1500),
-  //                                     );
-  //
-  //                                     setState(() {
-  //                                       _isLoading = false;
-  //                                     });
-  //                                   },
-  //                           style: ElevatedButton.styleFrom(
-  //                             backgroundColor: const Color(0xFF005DC2),
-  //                             elevation: 6,
-  //                             shape: RoundedRectangleBorder(
-  //                               borderRadius: BorderRadius.circular(8),
-  //                             ),
-  //                             minimumSize: const Size(80, 40),
-  //                           ),
-  //                           child: const Text(
-  //                             'OK',
-  //                             style: TextStyle(color: Colors.white),
-  //                           ),
-  //                         ),
-  //                       ],
-  //                     ),
-  //                   ],
-  //                 ),
-  //               ),
-  //             ),
-  //           );
-  //         },
-  //       );
-  //     },
-  //   );
-  // }
 }
