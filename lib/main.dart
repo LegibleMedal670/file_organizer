@@ -84,10 +84,7 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> {
         originalPdf.pages[i].createTemplate(),
         Offset(0, 0),
         // 원본 페이지 크기에 맞추기
-        Size(
-            originalPdf.pages[i].size.width,
-            originalPdf.pages[i].size.height
-        ),
+        Size(originalPdf.pages[i].size.width, originalPdf.pages[i].size.height),
       );
     }
 
@@ -100,7 +97,6 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> {
     File(outputFilePath).writeAsBytesSync(bytes);
 
     return outputFilePath;
-
   }
 
   Future<void> _uploadFiles() async {
@@ -151,7 +147,7 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> {
           final csvFile = File(csvPath);
           await csvFile.writeAsString(csvData);
 
-          print('CSV 변환 성공 : $csvData');
+          print('CSV 변환 성공');
 
           processedFiles.add(csvFile);
         } catch (e) {
@@ -162,39 +158,34 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> {
       } else if (ext == 'docx' || ext == 'pptx') {
         // --- DOCX/PPTX → PDF 변환 로직 (시스템 tmp 사용, Process.run) ---
         try {
-
           // 1) 컨테이너 내부 파일을 시스템 tmp로 복사
           final sysInputPath = path.join(sysTemp.path, '$baseName.$ext');
-          final sysInputFile = await File(sysInputPath)
-              .writeAsBytes(await original.readAsBytes());
-
+          final sysInputFile = await File(
+            sysInputPath,
+          ).writeAsBytes(await original.readAsBytes());
 
           print(sysInputFile);
 
-          final converter = LibreDocConverter(
-            inputFile: sysInputFile,
-          );
+          final converter = LibreDocConverter(inputFile: sysInputFile);
 
           //
           final sysPdfFile = await converter.toPdf();
 
-            print(sysPdfFile.path);
+          print(sysPdfFile.path);
 
-            // 4) 컨테이너 내부 임시 디렉토리로 변환된 PDF를 복사
-            final containerPdfPath = path.join(tempDir.path, '$baseName.pdf');
-            final containerPdfFile = await File(containerPdfPath)
-                .writeAsBytes(await sysPdfFile.readAsBytes());
+          // 4) 컨테이너 내부 임시 디렉토리로 변환된 PDF를 복사
+          final containerPdfPath = path.join(tempDir.path, '$baseName.pdf');
+          final containerPdfFile = await File(
+            containerPdfPath,
+          ).writeAsBytes(await sysPdfFile.readAsBytes());
 
-            processedFiles.add(containerPdfFile);
+          processedFiles.add(containerPdfFile);
 
-            print('PDF변환 성공');
+          print('PDF변환 성공');
 
-            // 5) 시스템 tmp에 생성된 파일 정리 (선택 사항)
-            if (await sysInputFile.exists()) await sysInputFile.delete();
-            if (await sysPdfFile.exists()) await sysPdfFile.delete();
-
-
-
+          // 5) 시스템 tmp에 생성된 파일 정리 (선택 사항)
+          if (await sysInputFile.exists()) await sysInputFile.delete();
+          if (await sysPdfFile.exists()) await sysPdfFile.delete();
         } catch (e) {
           // 변환 실패 시 원본을 그대로 추가
           processedFiles.add(original);
@@ -217,24 +208,30 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> {
         try {
           final allLines = await file.readAsLines();
           final trimmedLines = allLines.take(20).toList();
-          final trimmedCsv = trimmedLines.join('\n');
+          final trimmedText = trimmedLines.join('\n');
 
-          final trimmedPath = path.join(tempDir.path, '${baseName}_trimmed.csv');
+          final trimmedPath = path.join(
+            tempDir.path,
+            '${baseName}_trimmed.txt',
+          );
           final trimmedFile = File(trimmedPath);
-          await trimmedFile.writeAsString(trimmedCsv);
+          await trimmedFile.writeAsString(trimmedText);
 
-          print('CSV 자르기 성공: $trimmedCsv');
+          print(trimmedText);
 
           uploadFiles.add(trimmedFile);
         } catch (e) {
-          // 트리밍 실패 시 원본 CSV를 업로드
+          // 트리밍 또는 텍스트 변환 실패 시 원본 CSV를 업로드
           uploadFiles.add(file);
-          print('CSV 트리밍 오류: $e');
+          print('CSV 트리밍 및 텍스트 변환 오류: $e');
         }
-      } else if (ext =='pdf') {
+      } else if (ext == 'pdf') {
         try {
           final String originalPdfPath = file.path;
-          final String extractPdfPath = path.join(tempDir.path, '${baseName}.pdf');
+          final String extractPdfPath = path.join(
+            tempDir.path,
+            '${baseName}.pdf',
+          );
 
           final String pdfPath = await extractFirstNPages(
             inputFilePath: originalPdfPath,
@@ -247,8 +244,7 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> {
           print('PDF 자르기 성공');
 
           uploadFiles.add(pdfFile);
-
-        } catch (e){
+        } catch (e) {
           uploadFiles.add(file);
           print('PDF 자르기 오류: $e');
         }
@@ -267,7 +263,7 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> {
     setState(() {
       _uploadStatus = "파일 업로드 중...";
     });
-    final String backendUrl = 'http://172.25.86.197:8000/upload_and_summarize';
+    final String backendUrl = 'http://172.25.86.197:8000/upload_and_classify';
 
     try {
       var request = http.MultipartRequest('POST', Uri.parse(backendUrl));
@@ -281,15 +277,18 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> {
         } else if (ext == 'pdf') {
           mimeType = 'application/pdf';
         } else if (ext == 'docx') {
-          mimeType = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+          mimeType =
+              'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
         } else if (ext == 'xlsx') {
-          mimeType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+          mimeType =
+              'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
         } else if (ext == 'csv') {
           mimeType = 'text/csv';
         } else if (ext == 'txt') {
           mimeType = 'text/plain';
         } else if (ext == 'pptx') {
-          mimeType = 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
+          mimeType =
+              'application/vnd.openxmlformats-officedocument.presentationml.presentation';
         }
 
         request.files.add(
@@ -313,17 +312,21 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> {
         });
       } else {
         setState(() {
-          _uploadStatus = "파일 업로드 실패: ${response.statusCode} - ${response.body}";
+          _uploadStatus =
+              "파일 업로드 실패: ${response.statusCode} - ${response.body}";
+          _droppedFiles.clear();
           print(response.body);
         });
       }
     } catch (e) {
       setState(() {
         print(e);
+        _droppedFiles.clear();
         _uploadStatus = "오류 발생: $e";
       });
     } finally {
       setState(() {
+        _droppedFiles.clear();
         _isUploading = false;
       });
     }
@@ -335,7 +338,7 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> {
       backgroundColor: const Color(0xFF323232),
       body: Row(
         children: [
-          if (_droppedFiles.isNotEmpty)
+          if (_droppedFiles.isNotEmpty && !_isUploading)
             Expanded(
               flex: 1,
               child: Container(
@@ -436,16 +439,7 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> {
                         elevation: 6,
                         shadowColor: Colors.black45,
                       ),
-                      child: _isUploading
-                          ? const SizedBox(
-                        height: 20,
-                        width: 20,
-                        child: CircularProgressIndicator(
-                          color: Colors.white,
-                          strokeWidth: 2,
-                        ),
-                      )
-                          : const Text(
+                      child: const Text(
                         'Execute',
                         style: TextStyle(
                           color: Colors.white,
@@ -498,38 +492,53 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> {
                     ),
                     borderRadius: BorderRadius.circular(8),
                   ),
-                  child: _isUploading
-                      ? Center(
-                    child: Transform.scale(
-                      scale: 1.5,
-                      child: CircularProgressIndicator(
-                        color: const Color(0xFF005DC2),
-                      ),
-                    ),
-                  )
-                      : Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Icon(
-                        Icons.file_open_outlined,
-                        size: 70,
-                        color: _dragging
-                            ? const Color(0xFF005DC2)
-                            : const Color(0xFFAAAAAA),
-                      ),
-                      const SizedBox(height: 16),
-                      Text(
-                        'Drag & Drop Files Here',
-                        style: TextStyle(
-                          color: _dragging
-                              ? const Color(0xFF005DC2)
-                              : const Color(0xFFAAAAAA),
-                          fontSize: 20,
-                          fontWeight: FontWeight.w500,
-                        ),
-                      ),
-                    ],
-                  ),
+                  child:
+                      _isUploading
+                          ? Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Transform.scale(
+                                scale: 1.5,
+                                child: CircularProgressIndicator(
+                                  color: const Color(0xFF005DC2),
+                                ),
+                              ),
+                              SizedBox(height: 15),
+                              Text(
+                                _uploadStatus,
+                                style: TextStyle(
+                                  color: Color(0xFFAAAAAA),
+                                  fontSize: 18,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ],
+                          )
+                          : Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Icon(
+                                Icons.file_open_outlined,
+                                size: 70,
+                                color:
+                                    _dragging
+                                        ? const Color(0xFF005DC2)
+                                        : const Color(0xFFAAAAAA),
+                              ),
+                              const SizedBox(height: 16),
+                              Text(
+                                'Drag & Drop Files Here',
+                                style: TextStyle(
+                                  color:
+                                      _dragging
+                                          ? const Color(0xFF005DC2)
+                                          : const Color(0xFFAAAAAA),
+                                  fontSize: 20,
+                                  fontWeight: FontWeight.w500,
+                                ),
+                              ),
+                            ],
+                          ),
                 ),
               ),
             ),
