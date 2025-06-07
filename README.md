@@ -18,4 +18,6 @@ Flutter 데스크톱 애플리케이션과 FastAPI 서버를 연동하여, 사�
 - **서버**: `FastAPI` (Python)
 - **AI 연동**: `google-generative-ai` (Gemini API)
 
-### 파이썬 서버 코드는 `server`폴더에 넣어두었음
+---
+
+**파이썬 서버 코드는 `server`폴더에 넣어두었음**
