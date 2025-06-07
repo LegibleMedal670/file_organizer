@@ -68,6 +68,119 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> {
   /// 원본 파일명(확장자 포함) -> 원본 파일 전체 경로를 저장
   final Map<String, String> _originalPathMap = {};
 
+
+  final List<String> _formats = ['기본값', '시간순', '사진 정리'];
+
+  String _selectedFormat = '기본값';
+
+
+  void _showFormatDialog() {
+    String tempFormat = _selectedFormat;
+
+    showDialog(
+      context: context,
+      barrierDismissible: true,
+      builder: (context) {
+        return Dialog(
+          // ① 모달 배경색을 스캐폴드 배경색과 동일하게
+          backgroundColor: Colors.white,
+          elevation: 8,
+          insetPadding: const EdgeInsets.symmetric(horizontal: 24),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: StatefulBuilder(
+            builder: (context, setState) {
+              return Padding(
+                padding: const EdgeInsets.symmetric(vertical: 20, horizontal: 24),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      '정리 포맷 선택',
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.w600,
+                        color: Colors.black87,
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    ..._formats.map((fmt) {
+                      return RadioListTile<String>(
+                        activeColor: const Color(0xFF005DC2),
+                        title: Text(fmt, style: const TextStyle(fontSize: 14)),
+                        value: fmt,
+                        groupValue: tempFormat,
+                        contentPadding: EdgeInsets.zero,
+                        onChanged: (val) => setState(() => tempFormat = val!),
+                      );
+                    }).toList(),
+                    const SizedBox(height: 16),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: OutlinedButton(
+                            onPressed: () => Navigator.of(context).pop(),
+                            style: OutlinedButton.styleFrom(
+                              minimumSize: const Size(double.infinity, 44),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              side: BorderSide(color: Colors.grey.shade600),
+                              textStyle: const TextStyle(
+                                fontSize: 16,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                            child: Text(
+                              '취소',
+                              style: TextStyle(color: Colors.grey.shade600),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: ElevatedButton(
+                            onPressed: () {
+                              setState(() => _selectedFormat = tempFormat);
+                              Navigator.of(context).pop();
+                              _uploadFiles();
+                            },
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: const Color(0xFF005DC2),
+                              minimumSize: const Size(double.infinity, 44),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              elevation: 6,
+                              shadowColor: Colors.black45,
+                              textStyle: const TextStyle(
+                                fontSize: 16,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                            child: const Text(
+                              '정리하기',
+                              style: TextStyle(color: Colors.white),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+
+                  ],
+                ),
+              );
+            },
+          ),
+        );
+      },
+    );
+  }
+
+
+
+
   /// 파일 전처리 업로드 후처리
 
   Future<String> extractFirstNPages({
@@ -616,7 +729,7 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> {
                     ),
                     const SizedBox(height: 8),
                     ElevatedButton(
-                      onPressed: _isUploading ? null : _uploadFiles,
+                      onPressed: _isUploading ? null : _showFormatDialog,
                       style: ElevatedButton.styleFrom(
                         backgroundColor: const Color(0xFF005DC2),
                         minimumSize: const Size(double.infinity, 44),
