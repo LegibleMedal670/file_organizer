@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:desktop_drop/desktop_drop.dart';
@@ -60,41 +61,66 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> {
   bool _isUploading = false;
   String _uploadStatus = "파일을 드래그 앤 드롭하거나 선택하세요.";
 
+  /// 원본 파일명(확장자 포함) -> 원본 파일 전체 경로를 저장
+  final Map<String, String> _originalPathMap = {};
+
+  /// 파일 전처리 업로드 후처리
+
   Future<String> extractFirstNPages({
     required String inputFilePath,
     required String outputFilePath,
     required int nPages,
   }) async {
     // 1) 원본 PDF 불러오기
-    //    (로컬 파일 시스템에서 읽어올 때는 File(...).readAsBytesSync() 사용)
     final List<int> originalBytes = File(inputFilePath).readAsBytesSync();
     final PdfDocument originalPdf = PdfDocument(inputBytes: originalBytes);
 
-    // 2) 새 PdfDocument 생성
+    // 2) 결과를 담을 새로운 PdfDocument 생성
     final PdfDocument newPdf = PdfDocument();
 
-    // 3) 앞 nPages 만큼 페이지 복사
-    int total = originalPdf.pages.count;
-    int pagesToCopy = (nPages > total) ? total : nPages;
+    // 3) 앞 nPages 만큼만 복사하기
+    int totalPages = originalPdf.pages.count;
+    int pagesToCopy = (nPages > totalPages) ? totalPages : nPages;
 
-    for (int i = 0; i < pagesToCopy; i++) {
-      // PdfPageBase page = originalPdf.pages[i]; // 페이지 객체
-      // 페이지를 통째로 import 해서 복사
-      newPdf.pages.add().graphics.drawPdfTemplate(
-        originalPdf.pages[i].createTemplate(),
+    for (int pageIndex = 0; pageIndex < pagesToCopy; pageIndex++) {
+      // 3-1) 원본 페이지 객체
+      PdfPage originalPage = originalPdf.pages[pageIndex];
+
+      // 3-2) 원본 페이지의 Size(폭, 높이) 정보를 가져온다
+      Size originalSize = originalPage.size;
+
+      // 3-3) 새 페이지를 만들 때, 반드시 원본 페이지 크기를 그대로 지정
+      // newPdf.pages.add(Size) 오버로드가 없는 경우에는 아래처럼 pageSettings로 지정 후 add()
+      newPdf.pageSettings.size = originalSize;
+
+      // print('$inputFilePath\'s height: ${originalSize.height}, width: ${originalSize.width}');
+
+      newPdf.pageSettings.orientation =
+          originalSize.width >= originalSize.height
+              ? PdfPageOrientation.landscape
+              : PdfPageOrientation.portrait;
+
+      PdfPage newPage = newPdf.pages.add();
+
+      // 3-4) 원본 페이지 전체를 하나의 템플릿 객체로 만든다
+      // 최신 버전에서는 createTemplate()가 PdfTemplate을 반환한다.
+      PdfTemplate template = originalPage.createTemplate();
+
+      // 3-5) 새 페이지의 (0,0) 좌표에 원본 크기만큼 그대로 그린다
+      newPage.graphics.drawPdfTemplate(
+        template,
         Offset(0, 0),
-        // 원본 페이지 크기에 맞추기
-        Size(originalPdf.pages[i].size.width, originalPdf.pages[i].size.height),
+        Size(originalSize.width, originalSize.height),
       );
     }
 
-    // 4) 결과를 바이트로 저장
-    final List<int> bytes = await newPdf.save();
+    // 4) 새로운 PDF를 바이트 배열로 저장
+    final List<int> newBytes = await newPdf.save();
     newPdf.dispose();
     originalPdf.dispose();
 
     // 5) 디스크에 쓰기
-    File(outputFilePath).writeAsBytesSync(bytes);
+    File(outputFilePath).writeAsBytesSync(newBytes);
 
     return outputFilePath;
   }
@@ -112,25 +138,44 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> {
       _uploadStatus = "파일 업로드 전처리 중...";
     });
 
-    // 1) 변환된 파일들만 담을 리스트를 만듭니다.
+    // -----------------------
+    // 1) ★ 원본 파일명 → 원본 경로 매핑 저장
+    //    (여기서는 아직 전처리 전이므로, 단순히 원본만 매핑)
+    _originalPathMap.clear();
+    for (var file in _droppedFiles) {
+      final originalName = path.basename(
+        file.path,
+      ); // ex: "3장 계획.pdf" 또는 "과제.docx"
+      _originalPathMap[originalName] = file.path;
+    }
+    // -----------------------
+
+    // 2) ★ 전처리 파일명 → 원본 파일 경로 매핑 테이블
+    //    (이후 서버 응답에 나오는 전처리된 이름으로 원본을 찾아가기 위함)
+    final Map<String, String> processedToOriginalMap = {};
+
+    // 3) 전처리된 파일 객체들만 모아둘 리스트
     List<File> processedFiles = [];
 
-    // 2) 컨테이너 내부 임시 저장 디렉토리 경로를 가져옵니다.
+    // ★ 생성된 임시 파일 경로 추적 리스트
+    List<File> _tempCreatedFiles = [];
+
+    // 4) 앱 전용 임시 디렉토리 & 시스템 임시 디렉토리
     final tempDir = await getApplicationDocumentsDirectory();
-    // 3) 시스템 전체 임시 디렉토리 (컨테이너 샌드박스 회피용)
     final sysTemp = Directory.systemTemp;
 
+    // ===== 전처리 루프 =====
     for (var original in _droppedFiles) {
-      final ext = original.path.split('.').last.toLowerCase();
+      final ext =
+          path.extension(original.path).replaceFirst('.', '').toLowerCase();
       final baseName = path.basenameWithoutExtension(original.path);
 
       if (ext == 'xlsx') {
-        // --- XLSX → CSV 변환 로직 ---
+        // --- XLSX → CSV 변환 ---
         try {
           final bytes = await original.readAsBytes();
           final excel = e.Excel.decodeBytes(bytes);
 
-          // 모든 시트의 행 데이터를 2차원 리스트로 수집
           List<List<dynamic>> rows = [];
           for (var sheetName in excel.tables.keys) {
             final sheet = excel.tables[sheetName]!;
@@ -139,75 +184,79 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> {
             }
           }
 
-          // CSV 문자열로 변환
           String csvData = const ListToCsvConverter().convert(rows);
-
-          // 컨테이너 내부 임시 경로에 저장 (예: ".../basename.csv")
           final csvPath = path.join(tempDir.path, '$baseName.csv');
           final csvFile = File(csvPath);
           await csvFile.writeAsString(csvData);
+          _tempCreatedFiles.add(csvFile);
 
-          print('CSV 변환 성공');
+          // ★ 서버에 보낼 때는 이 CSV를 보내지만,
+          //    "test.xlsx" → "test.csv"로 전처리된 이름을 매핑해서
+          //    실제 이동 시에는 원본 XLSX를 사용하기 위함
+          processedToOriginalMap[path.basename(csvFile.path)] = original.path;
 
           processedFiles.add(csvFile);
         } catch (e) {
-          // 변환 실패 시 원본 XLSX를 그대로 업로드 리스트에 추가
+          // 변환에 실패하면 원본 XLSX를 그대로 업로드 대상으로 추가
           processedFiles.add(original);
-          print('XLSX → CSV 변환 오류 ($ext): $e');
         }
       } else if (ext == 'docx' || ext == 'pptx') {
-        // --- DOCX/PPTX → PDF 변환 로직 (시스템 tmp 사용, Process.run) ---
+        // --- DOCX/PPTX → PDF 변환 ---
         try {
-          // 1) 컨테이너 내부 파일을 시스템 tmp로 복사
+          // 1) 앱 내부(EX: tempDir)가 아닌 시스템 tmp로 복사
           final sysInputPath = path.join(sysTemp.path, '$baseName.$ext');
           final sysInputFile = await File(
             sysInputPath,
           ).writeAsBytes(await original.readAsBytes());
 
-          print(sysInputFile);
-
+          // 2) LibreDocConverter로 PDF 변환 (시스템 tmp에 생성)
           final converter = LibreDocConverter(inputFile: sysInputFile);
-
-          //
           final sysPdfFile = await converter.toPdf();
 
-          print(sysPdfFile.path);
-
-          // 4) 컨테이너 내부 임시 디렉토리로 변환된 PDF를 복사
+          // 3) 변환된 PDF를 앱 전용 디렉토리로 복사
           final containerPdfPath = path.join(tempDir.path, '$baseName.pdf');
           final containerPdfFile = await File(
             containerPdfPath,
           ).writeAsBytes(await sysPdfFile.readAsBytes());
+          _tempCreatedFiles.add(containerPdfFile);
+
+          // ★ "test.docx" → "test.pdf"로 전처리된 이름 → 실제 이동 시 원본 DOCX를 사용
+          processedToOriginalMap[path.basename(containerPdfFile.path)] =
+              original.path;
 
           processedFiles.add(containerPdfFile);
 
-          print('PDF변환 성공');
-
-          // 5) 시스템 tmp에 생성된 파일 정리 (선택 사항)
+          // 4) 시스템 tmp에 생성된 입력/출력 파일 삭제
           if (await sysInputFile.exists()) await sysInputFile.delete();
           if (await sysPdfFile.exists()) await sysPdfFile.delete();
         } catch (e) {
-          // 변환 실패 시 원본을 그대로 추가
+          // 변환 실패 시 원본 DOCX/PPTX를 그대로 업로드 대상으로 추가
           processedFiles.add(original);
-          print('$ext → PDF 변환 오류: $e');
         }
       } else {
-        // 그 외 확장자는 변환 없이 그대로 추가
+        // 기타 확장자(이미지, PDF, txt 등)는 전처리 없이 그대로 업로드
         processedFiles.add(original);
       }
     }
 
-    // 4) CSV 파일에서 앞 20줄만 추출하여 업로드용 리스트 준비
+    // ===== 리샘플링 단계: CSV, PDF 트리밍 등 =====
     List<File> uploadFiles = [];
     for (var file in processedFiles) {
-      final ext = file.path.split('.').last.toLowerCase();
+      final ext = path.extension(file.path).replaceFirst('.', '').toLowerCase();
       final baseName = path.basenameWithoutExtension(file.path);
 
       if (ext == 'csv') {
-        // --- CSV 파일에서 맨 앞 20줄만 추출 ---
+        // --- CSV 앞 20줄만 추출 → .txt 생성 ---
         try {
-          final allLines = await file.readAsLines();
-          final trimmedLines = allLines.take(20).toList();
+          final linesStream = file
+              .openRead()
+              .transform(utf8.decoder)
+              .transform(const LineSplitter());
+          final List<String> trimmedLines = [];
+          await for (var line in linesStream) {
+            trimmedLines.add(line);
+            if (trimmedLines.length >= 20) break;
+          }
           final trimmedText = trimmedLines.join('\n');
 
           final trimmedPath = path.join(
@@ -216,45 +265,74 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> {
           );
           final trimmedFile = File(trimmedPath);
           await trimmedFile.writeAsString(trimmedText);
+          _tempCreatedFiles.add(trimmedFile);
 
-          print(trimmedText);
+          // ★ "test.csv" → "test_trimmed.txt"로 전처리된 이름 → 실제 이동 시 원본 XLSX를 사용
+          //   (CSV를 만든 원본이 originalMap["test.xlsx"], or processedToOriginalMap["test.csv"])
+          //   원본 XLSX 경로를 찾기 위해 먼저 processedToOriginalMap["test.csv"]를 조회
+          String? xlsxOrigin = processedToOriginalMap[path.basename(file.path)];
+          if (xlsxOrigin != null) {
+            processedToOriginalMap[path.basename(trimmedFile.path)] =
+                xlsxOrigin;
+          } else {
+            // 만약 processedFiles에 CSV가 직접 들어왔다면, file.path가 원본 CSV일 수도 있다.
+            final maybeCsvOriginal = _originalPathMap[path.basename(file.path)];
+            if (maybeCsvOriginal != null) {
+              processedToOriginalMap[path.basename(trimmedFile.path)] =
+                  maybeCsvOriginal;
+            }
+          }
 
           uploadFiles.add(trimmedFile);
         } catch (e) {
-          // 트리밍 또는 텍스트 변환 실패 시 원본 CSV를 업로드
+          // 트리밍 실패 시 원본 CSV 그대로 업로드
           uploadFiles.add(file);
-          print('CSV 트리밍 및 텍스트 변환 오류: $e');
         }
       } else if (ext == 'pdf') {
+        // --- PDF 첫 5페이지만 추출 → 새 PDF 생성 ---
         try {
-          final String originalPdfPath = file.path;
-          final String extractPdfPath = path.join(
+          final originalPdfPath = file.path;
+          final extractPdfPath = path.join(
             tempDir.path,
-            '${baseName}.pdf',
+            '${baseName}_trimmed.pdf',
           );
 
-          final String pdfPath = await extractFirstNPages(
+          final pdfPath = await extractFirstNPages(
             inputFilePath: originalPdfPath,
             outputFilePath: extractPdfPath,
             nPages: 5,
           );
-
           final pdfFile = File(pdfPath);
+          _tempCreatedFiles.add(pdfFile);
 
-          print('PDF 자르기 성공');
+          // ★ "test.pdf" → "test_trimmed.pdf"로 전처리된 이름 → 실제 이동 시 원본 DOCX/PPTX를 사용
+          //   (PDF를 만든 원본이 processedToOriginalMap["test.pdf"])
+          final maybeDocxOrigin =
+              processedToOriginalMap[path.basename(file.path)];
+          if (maybeDocxOrigin != null) {
+            processedToOriginalMap[path.basename(pdfFile.path)] =
+                maybeDocxOrigin;
+          } else {
+            // 만약 file.path가 원본 PDF였다면 _originalPathMap에서 찾아본다
+            final maybePdfOriginal = _originalPathMap[path.basename(file.path)];
+            if (maybePdfOriginal != null) {
+              processedToOriginalMap[path.basename(pdfFile.path)] =
+                  maybePdfOriginal;
+            }
+          }
 
           uploadFiles.add(pdfFile);
         } catch (e) {
           uploadFiles.add(file);
-          print('PDF 자르기 오류: $e');
         }
       } else {
-        // PDF나 기타 파일은 그대로 업로드
+        // 이미지, txt 또는 변환 실패로 포함된 원본 파일 등 → 그대로 업로드
         uploadFiles.add(file);
+        // ★ 이 경우, _originalPathMap에 이미 매핑되어 있으므로 별도 조치 불필요
       }
     }
 
-    // 5) 변환 및 트리밍 완료 후 상태 업데이트
+    // 5) 전처리 완료 상태 업데이트
     setState(() {
       _uploadStatus = "파일 업로드 준비 완료: ${uploadFiles.length}개 파일";
     });
@@ -269,7 +347,8 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> {
       var request = http.MultipartRequest('POST', Uri.parse(backendUrl));
 
       for (var file in uploadFiles) {
-        final ext = file.path.split('.').last.toLowerCase();
+        final ext =
+            path.extension(file.path).replaceFirst('.', '').toLowerCase();
         String mimeType = 'application/octet-stream';
 
         if (['jpg', 'jpeg', 'png', 'webp'].contains(ext)) {
@@ -305,9 +384,58 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> {
       var response = await http.Response.fromStream(responseStream);
 
       if (response.statusCode == 200) {
+        print(response.body);
+
         setState(() {
           _uploadStatus = "파일 요약 완료: ${response.body}";
-          print(response.body);
+        });
+
+        // ============================
+        // 7) ★ “전처리된 파일명 → 원본 파일 경로(원본 확장자 그대로)”를
+        //       _originalPathMap에 병합
+        processedToOriginalMap.forEach((procName, origPath) {
+          // ex) key = "testDocx_trimmed.pdf", value = "/Users/.../Desktop/testDocx.docx"
+          _originalPathMap[procName] = origPath;
+        });
+        // ============================
+
+        try {
+          final Map<String, dynamic> jsonResp =
+              jsonDecode(response.body) as Map<String, dynamic>;
+          final orgSpec = jsonResp['organization_spec'] as Map<String, dynamic>;
+
+          // 8) 최상위 이동 폴더 생성 (바탕화면 '정리된 폴더' 하나만)
+          String desktopDir;
+          if (Platform.isWindows) {
+            // Windows라면 USERPROFILE/Desktop
+            desktopDir = path.join(
+              Platform.environment['USERPROFILE']!,
+              'Desktop',
+            );
+          } else {
+            // macOS/Linux라면 HOME/Desktop
+            desktopDir = path.join(Platform.environment['HOME']!, 'Desktop');
+          }
+
+          final String rootDirPath = path.join(desktopDir, '정리된 폴더');
+          final Directory rootDir = Directory(rootDirPath);
+          if (!rootDir.existsSync()) {
+            rootDir.createSync(recursive: true);
+          }
+
+          // 9) 폴더 구조대로 원본 파일 이동
+          createFoldersAndMoveFiles(orgSpec, rootDirPath, _originalPathMap);
+
+          setState(() {
+            _uploadStatus += "\n파일 정리 완료: $rootDirPath";
+          });
+        } catch (e) {
+          setState(() {
+            _uploadStatus += "\n파일 정리 중 오류: $e";
+          });
+        }
+
+        setState(() {
           _droppedFiles.clear();
         });
       } else {
@@ -315,21 +443,82 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> {
           _uploadStatus =
               "파일 업로드 실패: ${response.statusCode} - ${response.body}";
           _droppedFiles.clear();
-          print(response.body);
         });
       }
     } catch (e) {
       setState(() {
-        print(e);
         _droppedFiles.clear();
         _uploadStatus = "오류 발생: $e";
       });
     } finally {
+      // 10) ★ 임시 파일들 삭제
+      for (var tempFile in _tempCreatedFiles) {
+        try {
+          if (await tempFile.exists()) {
+            await tempFile.delete();
+          }
+        } catch (e) {
+          print('임시 파일 삭제 중 오류: $e');
+        }
+      }
+
       setState(() {
-        _droppedFiles.clear();
         _isUploading = false;
       });
     }
+  }
+
+  // =============================
+  // createFoldersAndMoveFiles 함수는 변경 없이 그대로 사용
+  // =============================
+  void createFoldersAndMoveFiles(
+    Map<String, dynamic> spec,
+    String currentPath,
+    Map<String, String> originalMap,
+  ) {
+    spec.forEach((key, value) {
+      // 1) 현재 레벨에서 생성할 폴더 경로
+      final String folderPath = path.join(currentPath, key);
+      final Directory dir = Directory(folderPath);
+
+      // 폴더가 없으면 생성
+      if (!dir.existsSync()) {
+        dir.createSync(recursive: true);
+      }
+
+      if (value is List) {
+        // value가 List라면 “파일 이름 리스트”로 간주 (processedName 들)
+        for (var processedName in value) {
+          if (processedName is String &&
+              originalMap.containsKey(processedName)) {
+            final String originalPath = originalMap[processedName]!;
+            final File origFile = File(originalPath);
+
+            // ★ 원본 파일명 그대로 유지하기 위해, 원본 경로에서 basename을 꺼냄
+            final String originalFileName = path.basename(originalPath);
+            final String newPath = path.join(folderPath, originalFileName);
+
+            try {
+              if (origFile.existsSync()) {
+                try {
+                  // 같은 디스크 내 이동: renameSync
+                  origFile.renameSync(newPath);
+                } catch (_) {
+                  // 크로스 디바이스 등으로 renameSync 실패 시 복사 + 삭제
+                  origFile.copySync(newPath);
+                  origFile.deleteSync();
+                }
+              }
+            } catch (e) {
+              print("파일 이동 오류 ($originalFileName): $e");
+            }
+          }
+        }
+      } else if (value is Map<String, dynamic>) {
+        // value가 Map이면 하위 폴더가 있으므로 재귀 호출
+        createFoldersAndMoveFiles(value, folderPath, originalMap);
+      }
+    });
   }
 
   @override
@@ -503,10 +692,10 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> {
                                   color: const Color(0xFF005DC2),
                                 ),
                               ),
-                              SizedBox(height: 15),
+                              const SizedBox(height: 15),
                               Text(
                                 _uploadStatus,
-                                style: TextStyle(
+                                style: const TextStyle(
                                   color: Color(0xFFAAAAAA),
                                   fontSize: 18,
                                   fontWeight: FontWeight.w600,
