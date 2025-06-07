@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:desktop_drop/desktop_drop.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
+import 'package:gpt_markdown/gpt_markdown.dart';
 import 'package:http/http.dart' as http;
 import 'package:http_parser/http_parser.dart';
 import 'package:excel/excel.dart' as e;
@@ -59,7 +60,10 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> {
   ];
 
   bool _isUploading = false;
-  String _uploadStatus = "파일을 드래그 앤 드롭하거나 선택하세요.";
+  List<String> _uploadStatusList = [];
+  bool _showResultButton = false;
+  bool _showMarkDown = false;
+  String _markdownSummary = '';
 
   /// 원본 파일명(확장자 포함) -> 원본 파일 전체 경로를 저장
   final Map<String, String> _originalPathMap = {};
@@ -127,15 +131,16 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> {
 
   Future<void> _uploadFiles() async {
     if (_droppedFiles.isEmpty) {
-      setState(() {
-        _uploadStatus = "업로드할 파일이 없습니다.";
-      });
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('업로드할 파일이 없습니다.')));
       return;
     }
 
     setState(() {
       _isUploading = true;
-      _uploadStatus = "파일 업로드 전처리 중...";
+      _uploadStatusList.clear();
+      _uploadStatusList.add("파일 업로드 전처리 중...");
     });
 
     // -----------------------
@@ -332,15 +337,13 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> {
       }
     }
 
-    // 5) 전처리 완료 상태 업데이트
     setState(() {
-      _uploadStatus = "파일 업로드 준비 완료: ${uploadFiles.length}개 파일";
+      _uploadStatusList.clear();
+      _uploadStatusList.add("파일 업로드 전처리 완료: ${processedFiles.length}개 파일");
+      _uploadStatusList.add("파일 업로드 중...");
     });
 
-    // 6) 실제 백엔드로 전송
-    setState(() {
-      _uploadStatus = "파일 업로드 중...";
-    });
+    // 실제 배포시엔 백엔드 구성해서 사용
     final String backendUrl = 'http://172.25.86.197:8000/upload_and_classify';
 
     try {
@@ -380,15 +383,17 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> {
         );
       }
 
+      setState(() {
+        _uploadStatusList.remove("파일 업로드 중...");
+        _uploadStatusList.add("파일 업로드 완료");
+        _uploadStatusList.add("파일 정리 중...");
+      });
+
       var responseStream = await request.send();
       var response = await http.Response.fromStream(responseStream);
 
       if (response.statusCode == 200) {
         print(response.body);
-
-        setState(() {
-          _uploadStatus = "파일 요약 완료: ${response.body}";
-        });
 
         // ============================
         // 7) ★ “전처리된 파일명 → 원본 파일 경로(원본 확장자 그대로)”를
@@ -427,12 +432,13 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> {
           createFoldersAndMoveFiles(orgSpec, rootDirPath, _originalPathMap);
 
           setState(() {
-            _uploadStatus += "\n파일 정리 완료: $rootDirPath";
+            _uploadStatusList.remove("파일 정리 중...");
+            _uploadStatusList.add("파일 정리 완료");
+            _showResultButton = true;
+            _markdownSummary = jsonResp['markdown_summary'] as String;
           });
         } catch (e) {
-          setState(() {
-            _uploadStatus += "\n파일 정리 중 오류: $e";
-          });
+          print(e);
         }
 
         setState(() {
@@ -440,15 +446,14 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> {
         });
       } else {
         setState(() {
-          _uploadStatus =
-              "파일 업로드 실패: ${response.statusCode} - ${response.body}";
+          print("파일 업로드 실패: ${response.statusCode} - ${response.body}");
           _droppedFiles.clear();
         });
       }
     } catch (e) {
       setState(() {
         _droppedFiles.clear();
-        _uploadStatus = "오류 발생: $e";
+        print("오류 발생: $e");
       });
     } finally {
       // 10) ★ 임시 파일들 삭제
@@ -461,16 +466,9 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> {
           print('임시 파일 삭제 중 오류: $e');
         }
       }
-
-      setState(() {
-        _isUploading = false;
-      });
     }
   }
 
-  // =============================
-  // createFoldersAndMoveFiles 함수는 변경 없이 그대로 사용
-  // =============================
   void createFoldersAndMoveFiles(
     Map<String, dynamic> spec,
     String currentPath,
@@ -539,7 +537,7 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> {
                     Row(
                       children: [
                         const Text(
-                          'Dropped Files',
+                          '등록된 파일',
                           style: TextStyle(
                             fontSize: 18,
                             fontWeight: FontWeight.bold,
@@ -629,7 +627,7 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> {
                         shadowColor: Colors.black45,
                       ),
                       child: const Text(
-                        'Execute',
+                        '정리하기',
                         style: TextStyle(
                           color: Colors.white,
                           fontSize: 16,
@@ -682,25 +680,148 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> {
                     borderRadius: BorderRadius.circular(8),
                   ),
                   child:
-                      _isUploading
+                      _showMarkDown
+                          ? Column(
+                            children: [
+                              Expanded(
+                                child: SingleChildScrollView(
+                                  padding: EdgeInsets.symmetric(vertical: 20),
+                                  child: SizedBox(
+                                    width: 600,
+                                    child: GptMarkdown(
+                                      _markdownSummary,
+                                      style: TextStyle(color: Colors.white),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                              Padding(
+                                padding: const EdgeInsets.only(
+                                  left: 100,
+                                  right: 100,
+                                  bottom: 10,
+                                ),
+                                child: ElevatedButton(
+                                  onPressed: () {
+                                    setState(() {
+                                      _showResultButton = false;
+                                      _isUploading = false;
+                                      _showMarkDown = false;
+                                      _markdownSummary = '';
+                                    });
+                                  },
+                                  style: ElevatedButton.styleFrom(
+                                    backgroundColor: const Color(0xFF005DC2),
+                                    minimumSize: const Size(
+                                      double.infinity,
+                                      44,
+                                    ),
+                                    shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(12),
+                                    ),
+                                    elevation: 6,
+                                    shadowColor: Colors.black45,
+                                  ),
+                                  child: const Text(
+                                    '확인',
+                                    style: TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 16,
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          )
+                          : _isUploading
                           ? Column(
                             mainAxisAlignment: MainAxisAlignment.center,
                             children: [
-                              Transform.scale(
-                                scale: 1.5,
-                                child: CircularProgressIndicator(
-                                  color: const Color(0xFF005DC2),
+                              _showResultButton
+                                  ? Padding(
+                                    padding: const EdgeInsets.only(
+                                      top: 160.0,
+                                      bottom: 30.0,
+                                    ),
+                                    child: Icon(
+                                      Icons.check_circle_outline,
+                                      size: 80,
+                                      color: Color(0xFF5CB85C),
+                                    ),
+                                  )
+                                  : Padding(
+                                    padding: const EdgeInsets.only(
+                                      top: 160.0,
+                                      bottom: 30.0,
+                                    ),
+                                    child: Transform.scale(
+                                      scale: 1.5,
+                                      child: CircularProgressIndicator(
+                                        color: const Color(0xFF005DC2),
+                                      ),
+                                    ),
+                                  ),
+                              // 로그가 쌓이는 영역
+                              SizedBox(
+                                height: 150, // 필요에 따라 조절
+                                child: ListView.builder(
+                                  itemCount: _uploadStatusList.length,
+                                  itemBuilder:
+                                      (context, idx) => Center(
+                                        child: Padding(
+                                          padding: const EdgeInsets.symmetric(
+                                            vertical: 4,
+                                          ),
+                                          child: Text(
+                                            _uploadStatusList[idx],
+                                            style: const TextStyle(
+                                              color: Color(0xFFAAAAAA),
+                                              fontSize: 18,
+                                              fontWeight: FontWeight.w600,
+                                            ),
+                                          ),
+                                        ),
+                                      ),
                                 ),
                               ),
-                              const SizedBox(height: 15),
-                              Text(
-                                _uploadStatus,
-                                style: const TextStyle(
-                                  color: Color(0xFFAAAAAA),
-                                  fontSize: 18,
-                                  fontWeight: FontWeight.w600,
+                              if (_showResultButton)
+                                Padding(
+                                  padding: const EdgeInsets.only(
+                                    left: 100,
+                                    right: 100,
+                                    bottom: 10,
+                                  ),
+                                  child: ElevatedButton(
+                                    onPressed: () {
+                                      setState(() {
+                                        _showResultButton = false;
+                                        _isUploading = false;
+                                        _showMarkDown = true;
+                                      });
+                                    },
+                                    style: ElevatedButton.styleFrom(
+                                      backgroundColor: const Color(0xFF005DC2),
+                                      minimumSize: const Size(
+                                        double.infinity,
+                                        44,
+                                      ),
+                                      shape: RoundedRectangleBorder(
+                                        borderRadius: BorderRadius.circular(12),
+                                      ),
+                                      elevation: 6,
+                                      shadowColor: Colors.black45,
+                                    ),
+                                    child: const Text(
+                                      '정리 요약 보기',
+                                      style: TextStyle(
+                                        color: Colors.white,
+                                        fontSize: 16,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
+                                  ),
                                 ),
-                              ),
                             ],
                           )
                           : Column(

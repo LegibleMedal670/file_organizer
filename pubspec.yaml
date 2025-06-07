@@ -47,6 +47,8 @@ dependencies:
   libre_doc_converter: ^0.1.1
   syncfusion_flutter_pdf: ^29.2.8
   path: ^1.9.1
+  flutter_math_fork: 0.7.3
+  gpt_markdown: ^1.0.19
 
 dev_dependencies:
   flutter_test:
