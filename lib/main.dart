@@ -457,7 +457,7 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> {
     });
 
     // 실제 배포시엔 백엔드 구성해서 사용
-    final String backendUrl = 'http://172.25.86.197:8000/upload_and_classify';
+    final String backendUrl = 'http://172.16.226.51:8000/upload_and_classify';
 
     try {
       var request = http.MultipartRequest('POST', Uri.parse(backendUrl));
@@ -560,12 +560,16 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> {
       } else {
         setState(() {
           print("파일 업로드 실패: ${response.statusCode} - ${response.body}");
+          _uploadStatusList.clear();
+          _isUploading = false;
           _droppedFiles.clear();
         });
       }
     } catch (e) {
       setState(() {
         _droppedFiles.clear();
+        _uploadStatusList.clear();
+        _isUploading = false;
         print("오류 발생: $e");
       });
     } finally {
